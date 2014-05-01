@@ -6,7 +6,7 @@
 
 /* The basic structures of the ch10fs filesystem */
 
-#define CH10BSIZE 512
+#define CH10BSIZE BLOCK_SIZE
 #define CH10BSBITS BLOCK_SIZE_BITS
 #define CH10BMASK (CH10BSIZE-1)
 #define CH10FS_MAGIC 0x42424242
