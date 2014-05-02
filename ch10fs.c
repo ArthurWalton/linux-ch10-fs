@@ -46,7 +46,6 @@ static struct inode *ch10fs_iget(struct super_block *sb, unsigned long pos);
 static int ch10fs_blk_read(struct super_block *sb, unsigned long pos,
 			  void *buf, size_t buflen)
 {
-	printk(KERN_INFO "ch10fs_blk_read: reading %u at %lu on %s\n", buflen, pos, sb->s_id);
 	struct buffer_head *bh;
 	unsigned long offset;
 	size_t segment;
@@ -57,12 +56,10 @@ static int ch10fs_blk_read(struct super_block *sb, unsigned long pos,
 		segment = min_t(size_t, buflen, CH10BSIZE - offset);
 		bh = sb_bread(sb, pos >> CH10BSBITS);
 
-		printk(KERN_INFO "ch10fs_blk_read: reading block %lu offset %lu on %s\n", (pos >> CH10BSBITS), offset, sb->s_id);
 		if (!bh) {
-			printk(KERN_INFO "ch10fs_blk_read: failed\n");
 			return -EIO;
 		}
-		print_hex_dump_bytes("", DUMP_PREFIX_OFFSET, bh->b_data, 1024);
+		//		print_hex_dump_bytes("", DUMP_PREFIX_OFFSET, bh->b_data, 1024);
 		memcpy(buf, bh->b_data + offset, segment);
 		brelse(bh);
 		buf += segment;
@@ -74,96 +71,12 @@ static int ch10fs_blk_read(struct super_block *sb, unsigned long pos,
 }
 
 /*
- * determine the length of a string in ch10fs on a block device
- */
-static ssize_t ch10fs_blk_strnlen(struct super_block *sb,
-				 unsigned long pos, size_t limit)
-{
-	struct buffer_head *bh;
-	unsigned long offset;
-	ssize_t n = 0;
-	size_t segment;
-	u_char *buf, *p;
-
-	/* scan the string up to blocksize bytes at a time */
-	while (limit > 0) {
-		offset = pos & (CH10BSIZE - 1);
-		segment = min_t(size_t, limit, CH10BSIZE - offset);
-		bh = sb_bread(sb, pos >> CH10BSBITS);
-		if (!bh)
-			return -EIO;
-		buf = bh->b_data + offset;
-		p = memchr(buf, 0, segment);
-		brelse(bh);
-		if (p)
-			return n + (p - buf);
-		limit -= segment;
-		pos += segment;
-		n += segment;
-	}
-
-	return n;
-}
-
-/*
- * compare a string to one in a ch10fs image on a block device
- * - return 1 if matched, 0 if differ, -ve if error
- */
-static int ch10fs_blk_strcmp(struct super_block *sb, unsigned long pos,
-			    const char *str, size_t size)
-{
-	struct buffer_head *bh;
-	unsigned long offset;
-	size_t segment;
-	bool matched, terminated = false;
-
-	/* compare string up to a block at a time */
-	while (size > 0) {
-		offset = pos & (CH10BSIZE - 1);
-		segment = min_t(size_t, size, CH10BSIZE - offset);
-		bh = sb_bread(sb, pos >> CH10BSBITS);
-		if (!bh)
-			return -EIO;
-		matched = (memcmp(bh->b_data + offset, str, segment) == 0);
-
-		size -= segment;
-		pos += segment;
-		str += segment;
-		if (matched && size == 0 && offset + segment < CH10BSIZE) {
-			if (!bh->b_data[offset + segment])
-				terminated = true;
-			else
-				matched = false;
-		}
-		brelse(bh);
-		if (!matched)
-			return 0;
-	}
-
-	if (!terminated) {
-		/* the terminating NUL must be on the first byte of the next
-		 * block */
-		BUG_ON((pos & (CH10BSIZE - 1)) != 0);
-		bh = sb_bread(sb, pos >> CH10BSBITS);
-		if (!bh)
-			return -EIO;
-		matched = !bh->b_data[0];
-		brelse(bh);
-		if (!matched)
-			return 0;
-	}
-
-	return 1;
-}
-
-
-/*
  * read data from the ch10fs image
  */
 int ch10fs_dev_read(struct super_block *sb, unsigned long pos,
 		   void *buf, size_t buflen)
 {
-	printk(KERN_INFO "ch10fs: reading %u at %lu on %s\n", buflen, pos, sb->s_id);
+	//	printk(KERN_INFO "ch10fs: reading %u at %lu on %s\n", buflen, pos, sb->s_id);
 	size_t limit;
 
 	limit = ch10fs_maxsize(sb);
@@ -178,52 +91,6 @@ int ch10fs_dev_read(struct super_block *sb, unsigned long pos,
 
 	return -EIO;
 }
-
-/*
- * determine the length of a string in ch10fs
- */
-ssize_t ch10fs_dev_strnlen(struct super_block *sb,
-			  unsigned long pos, size_t maxlen)
-{
-	size_t limit;
-
-	limit = ch10fs_maxsize(sb);
-	if (pos >= limit)
-		return -EIO;
-	if (maxlen > limit - pos)
-		maxlen = limit - pos;
-
-	if (sb->s_bdev)
-		return ch10fs_blk_strnlen(sb, pos, maxlen);
-
-	return -EIO;
-}
-
-/*
- * compare a string to one in ch10fs
- * - the string to be compared to, str, may not be NUL-terminated; instead the
- *   string is of the specified size
- * - return 1 if matched, 0 if differ, -ve if error
- */
-int ch10fs_dev_strcmp(struct super_block *sb, unsigned long pos,
-		     const char *str, size_t size)
-{
-	size_t limit;
-
-	limit = ch10fs_maxsize(sb);
-	if (pos >= limit)
-		return -EIO;
-	if (size > CH10FS_MAXFN)
-		return -ENAMETOOLONG;
-	if (size + 1 > limit - pos)
-		return -EIO;
-
-	if (sb->s_bdev)
-		return ch10fs_blk_strcmp(sb, pos, str, size);
-
-	return -EIO;
-}
-
 
 /*
  * read a page worth of data from the image
@@ -274,68 +141,117 @@ static const struct address_space_operations ch10fs_aops = {
 	.readpage	= ch10fs_readpage
 };
 
+
+static int ch10fs_dirblock_count(struct super_block *sb) {
+	int ret;
+	struct ch10fs_dir_block db;
+	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
+	if(ret < 0) return ret;
+	int count = 1;
+	__be64 cblock = 1;
+
+	while(be64_to_cpu(db.next) != cblock && count < CH10FS_MAX_DIRBLOCKS) {
+		ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
+		if(ret < 0) return ret;
+		count++;
+		cblock = be64_to_cpu(db.next);
+	}
+
+	return count;
+}
+
+static int ch10fs_get_volume_count(struct super_block *sb) {
+	int ret;
+	struct ch10fs_dir_block db;	
+	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
+	if(ret < 0) return ret;
+	int count = 1;
+	__be64 cblock = 1;
+
+	char volname[CH10FS_MAXVOLN];
+	strncpy(volname, db.volume, CH10FS_MAXVOLN);
+	while(be64_to_cpu(db.next) != cblock && count < CH10FS_MAX_DIRBLOCKS) {
+		ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
+		if(ret < 0) return ret;
+		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) {
+			strncpy(volname, db.volume, CH10FS_MAXVOLN);
+			count++;
+		}
+
+		cblock = be64_to_cpu(db.next);
+	}
+
+	return count;
+}
+
+static int ch10fs_fill_volumes(struct file *filp, void *dirent, filldir_t filldir) {
+	int ret;
+	struct inode *i = filp->f_dentry->d_inode;
+	struct dentry *de = filp->f_dentry;
+	struct ch10fs_dir_block db;	
+	ret = ch10fs_dev_read(i->i_sb, 512, &db, sizeof(db));
+	if(ret < 0) return ret;
+	int count = 1;
+	__be64 cblock = 1;
+
+	char volname[CH10FS_MAXVOLN];
+	strncpy(volname, db.volume, CH10FS_MAXVOLN);
+
+	int ino = 1;
+	if(strncmp(volname, "", CH10FS_MAXVOLN) == 0) {
+		filldir(dirent, "unnamed", 7, filp->f_pos++, ino, DT_DIR);
+	} else {
+		filldir(dirent, volname, strnlen(volname, CH10FS_MAXVOLN), filp->f_pos++, ino, DT_DIR);
+	}
+
+	while(be64_to_cpu(db.next) != cblock && count < CH10FS_MAX_DIRBLOCKS) {
+		ret = ch10fs_dev_read(i->i_sb, 512, &db, sizeof(db));
+		if(ret < 0) return ret;
+		ino += (CH10_FILES_PER_DIR_ENTRY + 1);
+		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) {
+			strncpy(volname, db.volume, CH10FS_MAXVOLN);
+			filldir(dirent, volname, strnlen(volname, CH10FS_MAXVOLN), filp->f_pos++, ino, DT_DIR);
+		}
+		count++;
+
+		cblock = be64_to_cpu(db.next);
+	}
+}
+
 /*
  * read the entries from a directory
  */
 static int ch10fs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
 	struct inode *i = filp->f_dentry->d_inode;
+	struct dentry *de = filp->f_dentry;
 	struct ch10fs_inode ri;
+	struct ch10fs_dir_block db;
 	unsigned long offset, maxoff;
 	int j, ino, nextfh;
 	int stored = 0;
-	char fsname[CH10FS_MAXFN];	/* XXX dynamic? */
+	char fsname[CH10FS_MAXFN]; 
 	int ret;
 
-	maxoff = ch10fs_maxsize(i->i_sb);
-#if 0
-	offset = filp->f_pos;
-	if (!offset) {
-	  	offset = i->i_ino & ROMFH_MASK;
-		ret = ch10fs_dev_read(i->i_sb, offset, &ri, ROMFH_SIZE);
-		if (ret < 0)
-			goto out;
-			offset = be32_to_cpu(ri.spec) & ROMFH_MASK;
+	//	printk(KERN_NOTICE "CH10FS: reading volume count %d\n", ch10fs_get_volume_count(i->i_sb));
+
+	//	ret = ch10fs_dev_read(i->i_sb, 512, &db, sizeof(db));
+
+	printk(KERN_NOTICE "Ch10fs: readddir on inode %d\n", i->i_ino);
+
+	//	printk(KERN_NOTICE "CH10FS: dir block size: %u, file cnt: %hu\n", be32_to_cpu(db.block_size), be16_to_cpu(db.file_cnt));
+
+	if(filp->f_pos > 0 )
+		return 1;
+	if(filldir(dirent, ".", 1, filp->f_pos++, de->d_inode->i_ino, DT_DIR)||
+	   (filldir(dirent, "..", 2, filp->f_pos++, de->d_parent->d_inode->i_ino, DT_DIR)))
+		return 0;
+
+	if(i->ino == 0) {	
+		ch10fs_fill_volumes(filp, dirent, filldir);
 	}
 
-	/* Not really failsafe, but we are read-only... */
-	for (;;) {
-		if (!offset || offset >= maxoff) {
-			offset = maxoff;
-			filp->f_pos = offset;
-			goto out;
-		}
-		filp->f_pos = offset;
-
-		/* Fetch inode info */
-		ret = ch10fs_dev_read(i->i_sb, offset, &ri, ROMFH_SIZE);
-		if (ret < 0)
-			goto out;
-
-		j = ch10fs_dev_strnlen(i->i_sb, offset + ROMFH_SIZE,
-				      sizeof(fsname) - 1);
-		if (j < 0)
-			goto out;
-
-		ret = ch10fs_dev_read(i->i_sb, offset + ROMFH_SIZE, fsname, j);
-		if (ret < 0)
-			goto out;
-		fsname[j] = '\0';
-
-		ino = offset;
-		nextfh = be32_to_cpu(ri.next);
-		if ((nextfh & ROMFH_TYPE) == ROMFH_HRD)
-			ino = be32_to_cpu(ri.spec);
-		if (filldir(dirent, fsname, j, offset, ino,
-			    ch10fs_dtype_table[nextfh & ROMFH_TYPE]) < 0)
-			goto out;
-
-		stored++;
-		offset = nextfh & ROMFH_MASK;
-	}
-#endif
-out:
-	return stored;
+	return 1;
 }
 
 /*
@@ -349,8 +265,10 @@ static struct dentry *ch10fs_lookup(struct inode *dir, struct dentry *dentry,
 	struct ch10fs_inode ri;
 	const char *name;		/* got from dentry */
 	int len, ret;
+
+	printk(KERN_NOTICE "CH10FS: looking up inode %d\n", dir->i_ino);
 #if 0
-	offset = dir->i_ino & ROMFH_MASK;
+	offset = dir->i_ino;
 	ret = ch10fs_dev_read(dir->i_sb, offset, &ri, ROMFH_SIZE);
 	if (ret < 0)
 		goto error;
@@ -383,9 +301,6 @@ static struct dentry *ch10fs_lookup(struct inode *dir, struct dentry *dentry,
 		offset = be32_to_cpu(ri.next) & ROMFH_MASK;
 	}
 
-	/* Hard link handling */
-	if ((be32_to_cpu(ri.next) & ROMFH_TYPE) == ROMFH_HRD)
-		offset = be32_to_cpu(ri.spec) & ROMFH_MASK;
 #endif
 	inode = ch10fs_iget(dir->i_sb, offset);
 	if (IS_ERR(inode)) {
@@ -421,6 +336,56 @@ static const struct inode_operations ch10fs_dir_inode_operations = {
 	.lookup		= ch10fs_lookup,
 };
 
+static struct inode *ch10fs_root_iget(struct super_block *sb)
+{
+	struct ch10fs_inode_info *inode;
+	struct ch10fs_dir_block db;
+	struct inode *i;
+	unsigned nextfh;
+	int ret;
+	umode_t mode;
+
+	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
+	if (ret < 0)
+		goto error;
+
+	/* get an inode for this image position */
+	i = iget_locked(sb, 0);
+	if (!i)
+		return ERR_PTR(-ENOMEM);
+
+	if (!(i->i_state & I_NEW))
+		return i;
+
+	/* precalculate the data offset */
+	//	inode = CH10FS_I(i);
+	//inode->i_metasize = sizeof(db);
+	//	inode->i_dataoffset = pos + inode->i_metasize;
+
+	set_nlink(i, 1);		/* Hard to decide.. */
+	//	i->i_size = be32_to_cpu(ri.size);
+	i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
+	i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
+
+	/* set up mode and ops */
+	mode = S_IFDIR | 0644;
+
+	i->i_size = CH10FS_I(i)->i_metasize;
+	i->i_op = &ch10fs_dir_inode_operations;
+	i->i_fop = &ch10fs_dir_operations;
+	i->i_mode = mode;
+
+	unlock_new_inode(i);
+	return i;
+	
+eio:
+	ret = -EIO;
+error:
+	printk(KERN_ERR "CH10FS: read error for root inode\n");
+	return ERR_PTR(ret);
+}
+
+
 /*
  * get a ch10fs inode based on its position in the image (which doubles as the
  * inode number)
@@ -435,21 +400,9 @@ static struct inode *ch10fs_iget(struct super_block *sb, unsigned long pos)
 	int ret;
 	umode_t mode;
 #if 0
-	/* we might have to traverse a chain of "hard link" file entries to get
-	 * to the actual file */
-	for (;;) {
-		ret = ch10fs_dev_read(sb, pos, &ri, sizeof(ri));
-		if (ret < 0)
-			goto error;
-
-		/* XXX: do ch10fs_checksum here too (with name) */
-
-		nextfh = be32_to_cpu(ri.next);
-		if ((nextfh & ROMFH_TYPE) != ROMFH_HRD)
-			break;
-
-		pos = be32_to_cpu(ri.spec) & ROMFH_MASK;
-	}
+	ret = ch10fs_dev_read(sb, pos, &ri, sizeof(ri));
+	if (ret < 0)
+		goto error;
 
 	/* determine the length of the filename */
 	nlen = ch10fs_dev_strnlen(sb, pos + ROMFH_SIZE, CH10FS_MAXFN);
@@ -494,10 +447,6 @@ static struct inode *ch10fs_iget(struct super_block *sb, unsigned long pos)
 		if (nextfh & ROMFH_EXEC)
 			mode |= S_IXUGO;
 		break;
-	case ROMFH_SYM:
-		i->i_op = &page_symlink_inode_operations;
-		i->i_data.a_ops = &ch10fs_aops;
-		mode |= S_IRWXUGO;
 		break;
 	default:
 		/* depending on MBZ for sock/fifos */
@@ -582,9 +531,9 @@ static const struct super_operations ch10fs_super_ops = {
  */
 static int ch10fs_fill_super(struct super_block *sb, void *data, int silent)
 {
-	struct ch10fs_super_block *rsb;
+	struct ch10fs_dir_block *csb;
 	struct inode *root;
-	unsigned long pos, img_size;
+	unsigned long img_size;
 	const char *storage;
 	size_t len;
 	int ret;
@@ -596,42 +545,38 @@ static int ch10fs_fill_super(struct super_block *sb, void *data, int silent)
 	sb->s_op = &ch10fs_super_ops;
 
 	/* read the image superblock and check it */
-	rsb = kmalloc(512, GFP_KERNEL);
-	if (!rsb)
+	csb = kmalloc(512, GFP_KERNEL);
+	if (!csb)
 		return -ENOMEM;
 
 	sb->s_fs_info = (void *) 1024;
-	ret = ch10fs_dev_read(sb, 512, rsb, 512);
+	ret = ch10fs_dev_read(sb, 512, csb, 512);
 	if (ret < 0)
-		goto error_rsb;
+		goto error_csb;
 
-	//	print_hex_dump_bytes("", DUMP_PREFIX_OFFSET, rsb, 512);
+	//img_size = be32_to_cpu(csb->size);
 
-	img_size = be32_to_cpu(rsb->size);
+	sb->s_fs_info = (void *)  0x20000000;//img_size;
 
-	sb->s_fs_info = (void *) img_size;
-
-	if (rsb->word0 != CH10FS_MAGIC_WORD0 || rsb->word1 != CH10FS_MAGIC_WORD1) {
+	if (csb->word0 != CH10FS_MAGIC_WORD0 || csb->word1 != CH10FS_MAGIC_WORD1) {
 		if (!silent)
 			printk(KERN_WARNING "VFS:"
 			       " Can't find a ch10fs filesystem on dev %s.\n",
 			       sb->s_id);
-		goto error_rsb_inval;
+		goto error_csb_inval;
 	}
 
 	storage = "the block layer";
-	len = strnlen(rsb->name, CH10FS_MAXFN);
+	len = strnlen(csb->volume, CH10FS_MAXFN);
 	//	if (!silent)
 	printk(KERN_NOTICE "CH10FS: Mounting image '%*.*s' through %s\n",
-	       (unsigned) len, (unsigned) len, rsb->name, storage);
+	       (unsigned) len, (unsigned) len, csb->volume, storage);
 
-	kfree(rsb);
-	rsb = NULL;
+	kfree(csb);
+	csb = NULL;
 
 	/* find the root directory */
-	pos = 0;//(CH10FH_SIZE + len + 1 + ROMFH_PAD) & ROMFH_MASK;
-
-	root = ch10fs_iget(sb, pos);
+	root = ch10fs_root_iget(sb);
 	if (IS_ERR(root))
 		goto error;
 
@@ -643,10 +588,10 @@ static int ch10fs_fill_super(struct super_block *sb, void *data, int silent)
 
 error:
 	return -EINVAL;
-error_rsb_inval:
+error_csb_inval:
 	ret = -EINVAL;
-error_rsb:
-	kfree(rsb);
+error_csb:
+	kfree(csb);
 	return ret;
 }
 

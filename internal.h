@@ -16,6 +16,7 @@ static inline struct ch10fs_inode_info *CH10FS_I(struct inode *inode)
 	return container_of(inode, struct ch10fs_inode_info, vfs_inode);
 }
 
+
 #define ch10fs_ro_fops	generic_ro_fops
 
 /*
