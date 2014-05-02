@@ -22,14 +22,17 @@
 #define CH10FS_MAGIC_WORD0 __mk4('F','O','R','T')
 #define CH10FS_MAGIC_WORD1 __mk4('Y','t','w','o')
 
-struct ch10fs_inode {
-	__be32 next;
-	__be32 spec;
-	__be32 size;
-	__be32 checksum;
-	char name[0];
+struct ch10fs_file_entry {
+	u8 name[56];       
+	__be64 blockNum;      
+	__be64 numBlocks;     
+	__be64 size;          
+	u8 createDate[8];  
+	u8 createTime[8];  
+	u8 timeType;       
+	u8 reserved[7];    
+	u8 closeTime[8];   
 };
-
 
 struct ch10fs_dir_block {
 	__be32 word0;
@@ -41,30 +44,7 @@ struct ch10fs_dir_block {
 	char volume[CH10FS_MAXVOLN];
 	__be64 next;
 	__be64 prev;
+	struct ch10fs_file_entry entries[];
 };
-
-/*
- * Ch10 Directory Entry
- */
-typedef struct {
-  //! name of the directory entry
-  u8 name[56];       
-  //! block number that the entry starts at
-  u64 blockNum;      
-  //! length of the entry in blocks
-  u64 numBlocks;     
-  //! length of the entry in bytes
-  u64 size;          
-  //! date entry was created
-  u8 createDate[8];  
-  //! time entry was created
-  u8 createTime[8];  
-  //! time system the previous date and time were stored in
-  u8 timeType;       
-  //! currently unused, reserved for future use
-  u8 reserved[7];    
-  //! time this entry was finished being written
-  u8 closeTime[8];   
-} ch10_dir_entry;
 
 #endif
