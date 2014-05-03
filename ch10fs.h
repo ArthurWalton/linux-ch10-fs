@@ -23,15 +23,15 @@
 #define CH10FS_MAGIC_WORD1 __mk4('Y','t','w','o')
 
 struct ch10fs_file_entry {
-	u8 name[56];       
-	__be64 blockNum;      
-	__be64 numBlocks;     
-	__be64 size;          
-	u8 createDate[8];  
-	u8 createTime[8];  
-	u8 timeType;       
-	u8 reserved[7];    
-	u8 closeTime[8];   
+	u8 name[56];
+	__be64 start_block;
+	__be64 block_cnt;
+	__be64 size;
+	u8 createDate[8];
+	u8 createTime[8];
+	u8 timeType;  
+	u8 reserved[7];
+	u8 closeTime[8];
 };
 
 struct ch10fs_dir_block {
@@ -44,7 +44,6 @@ struct ch10fs_dir_block {
 	char volume[CH10FS_MAXVOLN];
 	__be64 next;
 	__be64 prev;
-	struct ch10fs_file_entry entries[];
 };
 
 #endif

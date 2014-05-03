@@ -1,3 +1,31 @@
+/* IRIG 106 Chapter 10 filesystem driver
+ *
+ * Copyright © 2007 Arthur Walton (arthur.walton2@gmail.com)
+ * All Rights Reserved.
+ *
+ * Derived from: ROMFS file system
+ * Copyright © 2007 Red Hat, Inc. All Rights Reserved.
+ * written by David Howells (dhowells@redhat.com)
+ *
+ * using parts of the ROMFS file system, Linux implementation
+ * Copyright © 1997-1999  Janos Farkas <chexum@shadow.banki.hu>
+ *
+ * and parts of the minix filesystem
+ * Copyright © 1991, 1992  Linus Torvalds
+ *
+ * and parts of the affs filesystem additionally
+ * Copyright © 1993  Ray Burr
+ * Copyright © 1996  Hans-Joachim Widmaier
+ *
+ * Changes
+ *	May 2014			Initial release
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public Licence
+ * as published by the Free Software Foundation; either version
+ * 2 of the Licence, or (at your option) any later version.
+ */
+
 #include <linux/module.h>
 #include <linux/string.h>
 #include <linux/fs.h>
@@ -20,21 +48,6 @@
 #include "internal.h"
 
 static struct kmem_cache *ch10fs_inode_cachep;
-
-static const umode_t ch10fs_modemap[8] = {
-	0,			/* hard link */
-	S_IFDIR  | 0644,	/* directory */
-	S_IFREG  | 0644,	/* regular file */
-	S_IFLNK  | 0777,	/* symlink */
-	S_IFBLK  | 0600,	/* blockdev */
-	S_IFCHR  | 0600,	/* chardev */
-	S_IFSOCK | 0644,	/* socket */
-	S_IFIFO  | 0644		/* FIFO */
-};
-
-static const unsigned char ch10fs_dtype_table[] = {
-	DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DT_BLK, DT_CHR, DT_SOCK, DT_FIFO
-};
 
 static struct inode *ch10fs_iget(struct super_block *sb, unsigned long pos);
 
@@ -103,8 +116,6 @@ static int ch10fs_readpage(struct file *file, struct page *page)
 	void *buf;
 	int ret;
 
-	printk(KERN_INFO "ch10fs: readpage\n");
-
 	buf = kmap(page);
 	if (!buf)
 		return -ENOMEM;
@@ -118,7 +129,8 @@ static int ch10fs_readpage(struct file *file, struct page *page)
 		size -= offset;
 		fillsize = size > PAGE_SIZE ? PAGE_SIZE : size;
 
-		pos = CH10FS_I(inode)->i_dataoffset + offset;
+		pos = (CH10FS_I(inode)->i_datablock * 512) + offset;
+		printk(KERN_INFO "ch10fs: reading %lu from %lu\n", fillsize, pos);
 
 		ret = ch10fs_dev_read(inode->i_sb, pos, buf, fillsize);
 		if (ret < 0) {
@@ -189,73 +201,117 @@ static int ch10fs_get_volume_count(struct super_block *sb) {
 
 	return count;
 }
-/*
- * read the entries from a directory
- */
-static int ch10fs_readdir(struct file *filp, void *dirent, filldir_t filldir)
-{
-	int ret, count = 1;
-	struct ch10fs_dir_block db;	
+
+static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx, int dir_ino) {
+	int ret, len, ino, f;
+	struct ch10fs_dir_block db;
+	struct ch10fs_file_entry fe;
+	u64 cblock;
+	u64 offset;
+	char volname[CH10FS_MAXVOLN];
+	struct inode *i = file_inode(file);
+
+	for(cblock = 0, db.next = cpu_to_be64(1), ino = 1;
+	    be64_to_cpu(db.next) != cblock;
+	    ino += (CH10_FILES_PER_DIR_ENTRY + 1)) {
+		cblock = be64_to_cpu(db.next);
+		ret = ch10fs_dev_read(i->i_sb, cblock * 512, &db, sizeof(db));
+		if(ret < 0) 
+			goto out;
+
+		if (db.word0 != CH10FS_MAGIC_WORD0 || db.word1 != CH10FS_MAGIC_WORD1) {
+			printk(KERN_WARNING "ch10fs:"
+			       " tried to read block %llu with invalid magic.\n",
+			       cblock);
+			goto out;
+		}
+
+		/* found the dir, copy its name so 
+		   we can find the rest of it */
+		if(ino == dir_ino) {
+			strncpy(volname, db.volume, CH10FS_MAXVOLN);
+		}
+
+		/* not at the right dir block yet */
+		if(ino < ctx->pos % (CH10_FILES_PER_DIR_ENTRY + 1)) continue;
+		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) continue;
+
+		offset = cblock * 512 + sizeof(db);
+		for(f = 0; f < be16_to_cpu(db.file_cnt); f++) {
+			ret = ch10fs_dev_read(i->i_sb, offset, &fe, sizeof(fe));
+			if(ret < 0) 
+				goto out;
+			offset += sizeof(fe);
+
+			/* not at the right file entry yet */
+			if(ino + f + 1 <= ctx->pos) continue; 
+
+			len = strnlen(fe.name, CH10FS_MAXFN);
+			if (!dir_emit(ctx, fe.name, len, ino + f + 1, DT_REG))
+				goto out;
+			
+			printk(KERN_INFO "ch10fs: filling in '%s' file entry with ino %u\n", 
+			       fe.name, ino + f + 1);
+			ctx->pos = ino + f + 1;
+		}
+	}
+
+ out:
+	return 0;
+}
+
+static bool ch10fs_fill_directories(struct file *file, struct dir_context *ctx) {
+	int ret, count = 1, len;
+	struct ch10fs_dir_block db;
 	u64 cblock = 1;
 	char volname[CH10FS_MAXVOLN];
 	unsigned int ino = 1;
-	int stored = 0;
-	struct inode *i = filp->f_dentry->d_inode;
-	struct dentry *de = filp->f_dentry;
 
-	printk(KERN_NOTICE "Ch10fs: readddir on inode %lu, position %lu\n", i->i_ino, filp->f_pos);
+	struct inode *i = file_inode(file);
 
-       	if(filp->f_pos > 0 )
-	       	return 1;
-	if(filldir(dirent, ".", 1, 1, de->d_inode->i_ino, DT_DIR)||
-	   (filldir(dirent, "..", 2, 2, de->d_parent->d_inode->i_ino, DT_DIR)))
-	  return 0;
+       	if(ctx->pos > 0)
+		goto out;
 
-	//	ret = filldir(dirent, ".", 1, filp->f_pos, de->d_inode->i_ino, DT_DIR);
-	//	printk(KERN_INFO "ch10fs: filling in '.' dir entry with ino %lu\n", de->d_inode->i_ino);
-	//	if(ret) return 0;
+	if(!dir_emit_dot(file, ctx))
+		goto out;
 
-	//	filp->f_pos++;
-
-	//	ret = filldir(dirent, "..", 2, filp->f_pos++, de->d_parent->d_inode->i_ino, DT_DIR);
-	//	printk(KERN_INFO "ch10fs: filling in '..' dir entry with ino %lu\n", de->d_parent->d_inode->i_ino);
-	//	if(ret) return 0;
-
-	//	filp->f_pos++;
+	if(!dir_emit_dotdot(file, ctx))
+		goto out;
 
 	ret = ch10fs_dev_read(i->i_sb, 512, &db, sizeof(db));
-	if(ret < 0) return 0;
+	if(ret < 0) 
+		goto out;
 
 	strncpy(volname, db.volume, CH10FS_MAXVOLN);
 	if(strncmp(volname, "", CH10FS_MAXVOLN) == 0) {
-		if(filldir(dirent, "unnamed", 7, ino, ino, DT_DIR) < 0)
-			goto out;
-		printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %lu\n", "unnamed", ino);
-		filp->f_pos = ino;
-		stored++;
-	} else {
-		if(filldir(dirent, volname, strnlen(volname, CH10FS_MAXVOLN), ino, ino, DT_DIR) < 0)
-			goto out;
-		printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %lu\n", volname, ino);
+	    if (!dir_emit(ctx, "unnamed", 7, ino, DT_DIR))
+		goto out;
 
-		filp->f_pos = ino;
-		stored++;
+		printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %u\n", "unnamed", ino);
+		ctx->pos = ino;
+	} else {
+	    len = strnlen(volname, CH10FS_MAXVOLN);
+	    if (!dir_emit(ctx, volname, len, ino, DT_DIR))
+		goto out;
+
+		printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %u\n", volname, ino);
+		ctx->pos = ino;
 	}
 
 	while(be64_to_cpu(db.next) != cblock && count < CH10FS_MAX_DIRBLOCKS) {
 		ret = ch10fs_dev_read(i->i_sb, 512, &db, sizeof(db));
-		if(ret < 0) return ret;
+		if(ret < 0) 
+			goto out;
 
 		ino += (CH10_FILES_PER_DIR_ENTRY + 1);
 		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) {
 			strncpy(volname, db.volume, CH10FS_MAXVOLN);
-			if(filldir(dirent, volname, strnlen(volname, CH10FS_MAXVOLN), ino, ino, DT_DIR) < 0) 
-				goto out;
+			len = strnlen(volname, CH10FS_MAXVOLN);
+			if (!dir_emit(ctx, volname, len, ino, DT_DIR))
+			    goto out;
 			  
-			printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %lu\n", volname, ino);
-			filp->f_pos = ino;
-
-			stored++;
+			printk(KERN_INFO "ch10fs: filling in '%s' dir entry with ino %u\n", volname, ino);
+			ctx->pos = ino;
 		}
 		count++;
 
@@ -263,7 +319,26 @@ static int ch10fs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	}
 
  out:
-	return stored;
+	return 1;
+}
+
+/*
+ * read the entries from a directory
+ */
+static int ch10fs_iterate(struct file *file, struct dir_context *ctx)
+{
+	struct inode *i = file_inode(file);
+	printk(KERN_NOTICE "ch10fs: iterate on inode %lu, position %lu\n", 
+	       i->i_ino, (unsigned long)ctx->pos);
+
+	/* only the root (ino 0) has directories */
+	if(i->i_ino == 0) {
+		ch10fs_fill_directories(file, ctx);		
+	} else {
+		ch10fs_fill_volume_files(file, ctx, i->i_ino);
+	}
+
+	return 0;
 }
 
 /*
@@ -273,7 +348,8 @@ static int ch10fs_lookup_dir_ino(struct super_block *sb, const char *name) {
 	struct ch10fs_dir_block db;
 	u64 cblock = 1;	
 	int ino = 1, ret;
-	printk(KERN_INFO "ch10fs: looking up ino for dir '%s' unnamed? %d\n", name, strncmp(name, "unnamed", CH10FS_MAXVOLN));
+	printk(KERN_INFO "ch10fs: looking up ino for dir '%s' unnamed? %d\n", 
+	       name, strncmp(name, "unnamed", CH10FS_MAXVOLN));
 
 	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
 	if(ret < 0) return ret;
@@ -301,30 +377,51 @@ static int ch10fs_lookup_dir_ino(struct super_block *sb, const char *name) {
 /*
  * returns the inode number of the file with the specified name in the volume
  */
-static int ch10fs_lookup_file_ino(struct super_block *sb, const char* volume, const char *name) {
+static int ch10fs_lookup_file_ino(struct super_block *sb, const char* volname, const char *filename) {
+	int ret, ino, f;
 	struct ch10fs_dir_block db;
-	u64 cblock = 1;
-	int ino = 1, ret, i;
+	struct ch10fs_file_entry fe;
+	u64 cblock;
+	u64 offset;
 
-	printk(KERN_INFO "ch10fs: lookup_file_ino\n");
-
-	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
-	if(ret < 0) return ret;
-
-	while(be64_to_cpu(db.next) != cblock && ino < CH10FS_MAX_DIRBLOCKS) {
-		ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
-		if(ret < 0) return ret;
-		
-		for(i = 0; i < db.file_cnt; i++) {
-			if(strncmp(name, db.entries[i].name, CH10FS_MAXFN) == 0) {
-				return ino + i + 1;
-			}   
-		}
-		
+	for(cblock = 0, db.next = cpu_to_be64(1), ino = 1;
+	    be64_to_cpu(db.next) != cblock;
+	     ino += (CH10_FILES_PER_DIR_ENTRY + 1)) {
 		cblock = be64_to_cpu(db.next);
-		ino += (CH10_FILES_PER_DIR_ENTRY + 1);
-	}
+//		printk(KERN_INFO "looking at dir block %llu\n", (long long unsigned int)cblock);
+		ret = ch10fs_dev_read(sb, cblock * 512, &db, sizeof(db));
+		if(ret < 0) 
+			goto out;
 
+		if (db.word0 != CH10FS_MAGIC_WORD0 || db.word1 != CH10FS_MAGIC_WORD1) {
+			printk(KERN_WARNING "ch10fs:"
+			       " tried to read block %llu with invalid magic.\n",
+			       cblock);
+			goto out;
+		}
+
+//		printk(KERN_INFO "looking for volume '%s', at '%s'\n", 
+//		       volname, db.volume);
+		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) continue;
+
+//		printk(KERN_INFO "looking through %d files\n", 
+//		       be16_to_cpu(db.file_cnt));
+		offset = cblock * 512 + sizeof(db);
+		for(f = 0; f < be16_to_cpu(db.file_cnt); f++) {
+			ret = ch10fs_dev_read(sb, offset, &fe, sizeof(fe));
+			if(ret < 0) 
+				goto out;
+			offset += sizeof(fe);
+			
+			if(strncmp(filename, fe.name, CH10FS_MAXVOLN) != 0) continue;
+
+			printk(KERN_INFO "ch10fs: found ino %u for file '%s'\n", 
+			       ino + f + 1, filename);
+
+			return ino + f + 1;
+		}
+	}
+out:
 	return -EIO;
 }
 
@@ -347,6 +444,7 @@ static struct dentry *ch10fs_lookup(struct inode *dir, struct dentry *dentry,
 
 	name = dentry->d_name.name;
 	len = dentry->d_name.len;
+	
 
 	if(index == 0) {
 		index = ch10fs_lookup_dir_ino(dir->i_sb, name);
@@ -380,7 +478,7 @@ error:
 
 static const struct file_operations ch10fs_dir_operations = {
 	.read		= generic_read_dir,
-	.readdir	= ch10fs_readdir,
+	.iterate	= ch10fs_iterate,
 	.llseek		= default_llseek,
 };
 
@@ -393,7 +491,6 @@ static struct inode *ch10fs_root_iget(struct super_block *sb)
 	struct ch10fs_dir_block db;
 	struct inode *i;
 	int ret;
-	umode_t mode;
 
 	printk(KERN_INFO "ch10fs: root_iget\n");
 
@@ -410,8 +507,8 @@ static struct inode *ch10fs_root_iget(struct super_block *sb)
 		return i;
 
 	/* precalculate the data offset */
-	//	inode = CH10FS_I(i);
-	//inode->i_metasize = sizeof(db);
+	//inode = CH10FS_I(i);
+//	inode->i_metasize = sizeof(db);
 	//	inode->i_dataoffset = pos + inode->i_metasize;
 
 	set_nlink(i, 1);		/* Hard to decide.. */
@@ -419,13 +516,10 @@ static struct inode *ch10fs_root_iget(struct super_block *sb)
 	i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
 	i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
 
-	/* set up mode and ops */
-	mode = S_IFDIR | 0644;
-
-	i->i_size = CH10FS_I(i)->i_metasize;
+	i->i_size = 0;
 	i->i_op = &ch10fs_dir_inode_operations;
 	i->i_fop = &ch10fs_dir_operations;
-	i->i_mode = mode;
+	i->i_mode = S_IFDIR | 0555;
 
 	unlock_new_inode(i);
 	return i;
@@ -470,7 +564,9 @@ static struct inode *ch10fs_dir_iget(struct super_block *sb, unsigned long ino) 
 			i->i_size = 0;
 			i->i_op = &ch10fs_dir_inode_operations;
 			i->i_fop = &ch10fs_dir_operations;
-			i->i_mode = S_IFDIR  | 0644;
+			i->i_mode = S_IFDIR  | 0555;
+
+			printk(KERN_INFO "ch10fs: found inode information for ino %lu\n", ino);
 
 			unlock_new_inode(i);
 			return i;
@@ -484,34 +580,69 @@ static struct inode *ch10fs_dir_iget(struct super_block *sb, unsigned long ino) 
 }
 
 
-static struct inode *ch10fs_file_iget(struct super_block *sb, unsigned long ino) {
+static struct inode *ch10fs_file_iget(struct super_block *sb, unsigned long target_ino) {
+	int ret, ino, f;
+	struct ch10fs_inode_info *inode;
 	struct ch10fs_dir_block db;
+	struct ch10fs_file_entry fe;
 	struct inode *i;
-	unsigned long cblock = 1;
-	int index = 1, ret, j;
+	u64 cblock;
+	u64 offset;
 
-	printk(KERN_INFO "ch10fs: file_iget on ino %lu\n", ino);
+	printk(KERN_INFO "ch10fs: file_iget on ino %lu\n", target_ino);
 
-	ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
-	if(ret < 0) return ERR_PTR(ret);
+	for(cblock = 0, db.next = cpu_to_be64(1), ino = 1;
+	    be64_to_cpu(db.next) != cblock;
+	     ino += (CH10_FILES_PER_DIR_ENTRY + 1)) {
+		cblock = be64_to_cpu(db.next);
+		ret = ch10fs_dev_read(sb, cblock * 512, &db, sizeof(db));
+		if(ret < 0) 
+			goto error;
 
-	while(be64_to_cpu(db.next) != cblock && index < CH10FS_MAX_DIRBLOCKS) {
-		ret = ch10fs_dev_read(sb, 512, &db, sizeof(db));
-		if(ret < 0) return ERR_PTR(ret);
+		if (db.word0 != CH10FS_MAGIC_WORD0 || db.word1 != CH10FS_MAGIC_WORD1) {
+			printk(KERN_WARNING "ch10fs:"
+			       " tried to read block %llu with invalid magic.\n",
+			       cblock);
+			goto error;
+		}
 
-		for(j = 0; j < db.file_cnt; j++) {
-			if((index + j + 1) != ino) continue;
+		offset = (cblock * 512) + sizeof(db);
+		printk(KERN_WARNING "ch10fs:"
+		       " looking through %hu files on block %llu.\n",
+		       be16_to_cpu(db.file_cnt), cblock);
+		for(f = 0; f < be16_to_cpu(db.file_cnt); f++, offset += sizeof(fe)) {
+			printk(KERN_WARNING "ch10fs:"
+			       " at file %d, looking for %lu.\n",
+			       (ino + f + 1), target_ino);
+			
+			if((ino + f + 1) != target_ino) continue;
+
+			printk(KERN_WARNING "ch10fs:"
+			       " found file %lu.\n", target_ino);
+
+			ret = ch10fs_dev_read(sb, offset, &fe, sizeof(fe));
+			if(ret < 0) 
+				goto error;
 				
 			/* get an inode for this image position */
-			i = iget_locked(sb, ino);
+			i = iget_locked(sb, target_ino);
 			if (!i)
 				return ERR_PTR(-ENOMEM);
 			
 			if (!(i->i_state & I_NEW))
 				return i;
+
+			printk(KERN_WARNING "ch10fs:"
+			       " found file information for ino %lu, size %llu at block %llu.\n",
+			       target_ino, be64_to_cpu(fe.size), be64_to_cpu(fe.start_block));
+
+			/* precalculate the data offset */
+			inode = CH10FS_I(i);
+//			inode->i_metasize = (ROMFH_SIZE + nlen + 1 + ROMFH_PAD) & ROMFH_MASK;
+			inode->i_datablock = be64_to_cpu(fe.start_block);
 			
 			set_nlink(i, 1);		/* Hard to decide.. */
-			i->i_size = be32_to_cpu(db.entries[j].size);
+			i->i_size = min(be64_to_cpu(fe.size), be64_to_cpu(fe.block_cnt) * 512);
 			i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
 			i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
 			
@@ -523,11 +654,9 @@ static struct inode *ch10fs_file_iget(struct super_block *sb, unsigned long ino)
 			unlock_new_inode(i);
 			return i;
 		}
-		
-		cblock = be64_to_cpu(db.next);
-		ino += (CH10_FILES_PER_DIR_ENTRY + 1);
 	}
 
+error:
 	return ERR_PTR(-EIO);
 }
 
@@ -537,8 +666,10 @@ static struct inode *ch10fs_file_iget(struct super_block *sb, unsigned long ino)
  */
 static struct inode *ch10fs_iget(struct super_block *sb, unsigned long ino)
 {
-  int is_a_dir = ino == 0 || ino == 1 || ino % (CH10_FILES_PER_DIR_ENTRY + 1) == 0;
-  if(is_a_dir) {
+	int is_a_dir = ino == 0 || ino == 1 
+		|| ino % (1 + (CH10_FILES_PER_DIR_ENTRY + 1)) == 0;
+	printk(KERN_INFO "ch10fs: ch10fs_iget for ino %lu\n", ino);
+	if(is_a_dir) {
 		return ch10fs_dir_iget(sb, ino);
 	} else {
 		return ch10fs_file_iget(sb, ino);
