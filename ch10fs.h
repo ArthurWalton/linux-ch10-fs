@@ -37,8 +37,8 @@ struct ch10fs_file_entry {
 	__be64 start_block;
 	__be64 block_cnt;
 	__be64 size;
-	u8 createDate[8];
-	u8 createTime[8];
+	u8 cdate[8];
+	u8 ctime[8];
 	u8 timeType;  
 	u8 reserved[7];
 	u8 closeTime[8];
