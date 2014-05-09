@@ -17,10 +17,10 @@ struct ch10fs_inode_info {
 	unsigned long	i_datablock;	/* from the start of fs */
 };
 
-static inline size_t ch10fs_maxsize(struct super_block *sb)
-{
-	return (size_t) (unsigned long) sb->s_fs_info;
-}
+//static inline size_t ch10fs_maxsize(struct super_block *sb)
+//{
+//	return (size_t) (unsigned long) sb->s_fs_info;
+//}
 
 static inline struct ch10fs_inode_info *CH10FS_I(struct inode *inode)
 {

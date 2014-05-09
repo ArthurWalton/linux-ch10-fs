@@ -54,7 +54,7 @@ static struct inode *ch10fs_iget(struct super_block *sb, int pos);
 /*
  * read data from an ch10fs image on a block device
  */
-static int ch10fs_blk_read(struct super_block *sb, unsigned long pos,
+static int ch10fs_blk_read(struct super_block *sb, loff_t pos,
 			  void *buf, size_t buflen)
 {
 	struct buffer_head *bh;
@@ -84,18 +84,9 @@ static int ch10fs_blk_read(struct super_block *sb, unsigned long pos,
 /*
  * read data from the ch10fs image
  */
-int ch10fs_dev_read(struct super_block *sb, unsigned long pos,
+int ch10fs_dev_read(struct super_block *sb, loff_t pos,
 		   void *buf, size_t buflen)
 {
-	size_t limit;
-
-	limit = ch10fs_maxsize(sb);
-	if (pos >= limit) {
-		return -EIO;
-	}
-	if (buflen > limit - pos)
-		buflen = limit - pos;
-
 	if (sb->s_bdev)
 		return ch10fs_blk_read(sb, pos, buf, buflen);
 
@@ -108,29 +99,29 @@ int ch10fs_dev_read(struct super_block *sb, unsigned long pos,
 static int ch10fs_readpage(struct file *file, struct page *page)
 {
 	struct inode *inode = page->mapping->host;
-	loff_t offset, size;
-	unsigned long fillsize, pos;
+	loff_t offset, size, pos;
+	size_t fillsize;
 	void *buf;
 	int ret;
 
 	buf = kmap(page);
-	if (!buf)
+	if (!buf) {
+		printk(KERN_INFO "ch10fs: no memory to allocate page\n");
 		return -ENOMEM;
+	}
 
-	//TODO: 32 bit may have been fine for ROMFS but ch10 needs to support larger files
-	/* 32 bit warning -- but not for us :) */
 	offset = page_offset(page);
 	size = i_size_read(inode);
 	fillsize = 0;
 	ret = 0;
+
 	if (offset < size) {
 		size -= offset;
 		fillsize = size > PAGE_SIZE ? PAGE_SIZE : size;
-
 		pos = (CH10FS_I(inode)->i_datablock * 512) + offset;
-
 		ret = ch10fs_dev_read(inode->i_sb, pos, buf, fillsize);
 		if (ret < 0) {
+			printk(KERN_INFO "ch10fs: error reading page from disk\n");
 			SetPageError(page);
 			fillsize = 0;
 			ret = -EIO;
@@ -153,14 +144,15 @@ static const struct address_space_operations ch10fs_aops = {
 };
 
 static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx, int dir_ino) {
-	int ret, len, ino, f, rem;
-	unsigned long tmp;
+	int ret, len, ino, f;
 	struct ch10fs_dir_block db;
 	struct ch10fs_file_entry fe;
 	u64 cblock;
 	u64 offset;
 	char volname[CH10FS_MAXVOLN];
 	struct inode *i = file_inode(file);
+
+	printk(KERN_INFO "ch10fs: listing files in ino %d\n", dir_ino);
 
 	for(cblock = 0, db.next = cpu_to_be64(1), ino = 1;
 	    be64_to_cpu(db.next) != cblock;
@@ -181,13 +173,21 @@ static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx,
 		   we can find the rest of it */
 		if(ino == dir_ino) {
 			strncpy(volname, db.volume, CH10FS_MAXVOLN);
+			printk(KERN_INFO "ch10fs: found volume '%s' at ino %d\n", volname, ino);
 		}
 
 		/* not at the right dir block yet */
-		tmp = ctx->pos;
-		rem = do_div(tmp, (CH10_FILES_PER_DIR_ENTRY + 1));
-		if(ino < rem) continue;
-		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) continue;
+		if(ctx->pos >= ino + CH10_FILES_PER_DIR_ENTRY) {
+			printk(KERN_INFO "ch10fs: ino of %d less than target of %lu\n"
+			       , ino + CH10_FILES_PER_DIR_ENTRY, (unsigned long)ctx->pos);
+			continue;
+		}
+
+		if(strncmp(volname, db.volume, CH10FS_MAXVOLN) != 0) {
+			printk(KERN_INFO "ch10fs: current volume '%s' doesnt match expected '%s'\n"
+			       , db.volume, volname);
+			continue;
+		}
 
 		offset = cblock * 512 + sizeof(db);
 		for(f = 0; f < be16_to_cpu(db.file_cnt); f++) {

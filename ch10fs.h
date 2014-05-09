@@ -51,7 +51,7 @@ struct ch10fs_dir_block {
 	u8 shutdown;
 	__be16 file_cnt;
 	__be32 block_size;
-	char volume[CH10FS_MAXVOLN];
+	u8 volume[CH10FS_MAXVOLN];
 	__be64 next;
 	__be64 prev;
 };

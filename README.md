@@ -9,6 +9,5 @@ Limitations:
 - Only supports block size of 512
 - Most Ch10 devices have an empty block 0 with no standard partition table, 
   as a result you currently have to manually mount the drive.
-- Hasn't yet been tested on > 2GB files
 	
 
