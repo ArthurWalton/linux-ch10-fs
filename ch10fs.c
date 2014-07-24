@@ -143,6 +143,44 @@ static const struct address_space_operations ch10fs_aops = {
 	.readpage	= ch10fs_readpage
 };
 
+/*
+ * length limited verson of kstrtoint
+ */
+int __must_check kstrntoint(const char *s, unsigned int base, unsigned int *res, size_t size) {
+	char tmp[size + 1];
+	memcpy(tmp, s, size);
+	tmp[size] = '\0';
+	return kstrtoint(tmp, base, res);
+}
+
+/*
+ * convert a ch10 date and time entry to a timespec
+ */
+static struct timespec ch10fs_fs_datetime_to_timespec(u8 *createDate, u8 *createTime) {
+	int day, mon, year, hour, min, sec, hsec;
+	struct timespec t;
+	kstrntoint(createDate, 10, &day, 2);
+	kstrntoint(createDate + 2, 10, &mon, 2);
+	kstrntoint(createDate + 4, 10, &year, 4);
+
+	kstrntoint(createTime, 10, &hour, 2);
+	kstrntoint(createTime + 2, 10, &min, 2);
+	kstrntoint(createTime + 4, 10, &sec, 2);
+	kstrntoint(createTime + 8, 10, &hsec, 2);
+
+	t.tv_sec = mktime(year, mon, day, hour, min, sec);
+	t.tv_nsec = hsec * 10000000;
+	
+	printk(KERN_INFO "ch10fs: day-%d, month-%d, year-%d, "
+	       "hour-%d, minute-%d, second-%d, hs-%d\n",
+	       day, mon, year, hour, min, sec, hsec);
+
+	return t;
+}
+
+/*
+ * fills the context with list of files from the directory dir_ino
+ */
 static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx, int dir_ino) {
 	int ret, len, ino, f;
 	struct ch10fs_dir_block db;
@@ -169,8 +207,7 @@ static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx,
 			goto out;
 		}
 
-		/* found the dir, copy its name so 
-		   we can find the rest of it */
+		/* found the dir, copy its name so we can find the rest of it */
 		if(ino == dir_ino) {
 			strncpy(volname, db.volume, CH10FS_MAXVOLN);
 			printk(KERN_INFO "ch10fs: found volume '%s' at ino %d\n", volname, ino);
@@ -214,37 +251,9 @@ static bool ch10fs_fill_volume_files(struct file *file, struct dir_context *ctx,
 }
 
 /*
- * Length limited verson of kstrtoint
+ * fills the context with a list of all directories, 
+ * ch10 does not support nested directories
  */
-int __must_check kstrntoint(const char *s, unsigned int base, unsigned int *res, size_t size) {
-	char tmp[size + 1];
-	memcpy(tmp, s, size);
-	tmp[size] = '\0';
-	return kstrtoint(tmp, base, res);
-}
-
-static struct timespec ch10fs_fs_datetime_to_timespec(u8 *createDate, u8 *createTime) {
-	int day, mon, year, hour, min, sec, hsec;
-	struct timespec t;
-	kstrntoint(createDate, 10, &day, 2);
-	kstrntoint(createDate + 2, 10, &mon, 2);
-	kstrntoint(createDate + 4, 10, &year, 4);
-
-	kstrntoint(createTime, 10, &hour, 2);
-	kstrntoint(createTime + 2, 10, &min, 2);
-	kstrntoint(createTime + 4, 10, &sec, 2);
-	kstrntoint(createTime + 8, 10, &hsec, 2);
-
-	t.tv_sec = mktime(year, mon, day, hour, min, sec);
-	t.tv_nsec = hsec * 10000000;
-	
-	printk(KERN_INFO "ch10fs: day-%d, month-%d, year-%d, "
-	       "hour-%d, minute-%d, second-%d, hs-%d\n",
-	       day, mon, year, hour, min, sec, hsec);
-
-	return t;
-}
-
 static bool ch10fs_fill_directories(struct file *file, struct dir_context *ctx) {
 	int ret, len, ino, offset;
 	struct ch10fs_dir_block db;
@@ -271,6 +280,7 @@ static bool ch10fs_fill_directories(struct file *file, struct dir_context *ctx) 
 			goto out;
 		}
 
+		/* if the dir name is blank we will give it a name of 'unnamed' */
 		if(strncmp("", db.volume, CH10FS_MAXVOLN) == 0) {
 			strncpy(db.volume, "unnamed", CH10FS_MAXVOLN);
 		}
@@ -415,22 +425,21 @@ static struct dentry *ch10fs_lookup(struct inode *dir, struct dentry *dentry,
 	const char *name;		/* got from dentry */
 	int len, ret;
 
-	printk(KERN_NOTICE "CH10FS: looking up '%s' in inode %lu\n", name = dentry->d_name.name, dir->i_ino);
-
 	index = dir->i_ino;
 	/* Walk the directory entry list, if we are at the root then we look for a volume,
 	   otherwise we look for a file */
 
 	name = dentry->d_name.name;
 	len = dentry->d_name.len;
-	
+
+	/* if this belongs to the root (ino 0) then it is a directory */
 	if(index == 0) {
 		index = ch10fs_lookup_dir_ino(dir->i_sb, name);
-		printk(KERN_INFO "ch10fs: found dir ino %ld \n", index);
 		if(index < 0) {
 			printk(KERN_INFO "ch10fs: failed to find ino\n");
 			return ERR_PTR(index);
 		}
+	/* if it doesn't belong to root then it is a file */
 	} else {
 		index = ch10fs_lookup_file_ino(dir->i_sb, dir->i_ino, name);
 		if(index < 0)
@@ -469,6 +478,9 @@ static const struct inode_operations ch10fs_dir_inode_operations = {
 	.lookup		= ch10fs_lookup,
 };
 
+/*
+ * creates the root inode (ino 0)
+ */
 static struct inode *ch10fs_root_iget(struct super_block *sb)
 {
 	struct ch10fs_dir_block db;
@@ -505,6 +517,9 @@ error:
 	return ERR_PTR(ret);
 }
 
+/*
+ * creates a directory inode for the given inode number
+ */
 static struct inode *ch10fs_dir_iget(struct super_block *sb, unsigned long target_ino) {
 	int ret, ino;
 	struct ch10fs_dir_block db;
@@ -559,7 +574,9 @@ error:
 	return ERR_PTR(-EIO);
 }
 
-
+/*
+ * creates a file inode for the given inode number
+ */
 static struct inode *ch10fs_file_iget(struct super_block *sb, unsigned long target_ino) {
 	int ret, ino, f;
 	struct ch10fs_inode_info *inode;
