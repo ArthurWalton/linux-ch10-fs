@@ -1,7 +1,6 @@
 IRIG 106 Chapter 10 Filesystem Driver for Linux
 =============
-
-Linux filesystem driver for the IRIG 106 Chapter 10 Filesystem. see http://www.irig106.org/ for details of the format.
+IRIG 106 Chapter 10 is a filesystem used by flight recorders designed to work on a large variety of media (SSD, Tape, disks, etc.). see http://www.irig106.org/ for details of the format.
 
 For kernel version 3.11 and above
 
@@ -9,6 +8,5 @@ Limitations:
 - Read only
 - Only supports block size of 512
 - Most Ch10 devices have an empty block 0 with no standard partition table, 
-  as a result you currently have to manually mount the drive.
-	
+  as a result most drives will not auto-mount.	
 

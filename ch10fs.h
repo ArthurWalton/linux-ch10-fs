@@ -29,8 +29,8 @@
 #define __mkl(h,l) (((h)&0xffff)<<16|((l)&0xffff))
 #define __mk4(a,b,c,d) cpu_to_be32(__mkl(__mkw(a,b),__mkw(c,d)))
 
-#define CH10FS_MAGIC_WORD0 __mk4('F','O','R','T')
-#define CH10FS_MAGIC_WORD1 __mk4('Y','t','w','o')
+#define CH10FS_MAGIC_W0 __mk4('F','O','R','T')
+#define CH10FS_MAGIC_W1 __mk4('Y','t','w','o')
 
 struct ch10fs_file_entry {
 	u8 name[56];
@@ -39,14 +39,14 @@ struct ch10fs_file_entry {
 	__be64 size;
 	u8 cdate[8];
 	u8 ctime[8];
-	u8 timeType;  
+	u8 time_type;  
 	u8 reserved[7];
-	u8 closeTime[8];
+	u8 close_time[8];
 };
 
 struct ch10fs_dir_block {
-	__be32 word0;
-	__be32 word1;
+	__be32 mag0;
+	__be32 mag1;
 	u8 rev;
 	u8 shutdown;
 	__be16 file_cnt;
