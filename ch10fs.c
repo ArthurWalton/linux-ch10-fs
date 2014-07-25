@@ -1,7 +1,7 @@
 /* IRIG 106 Chapter 10 standard for flight recorders
  * filesystem driver
  *
- * Copyright © 2007 Arthur Walton (arthur.walton2@gmail.com)
+ * Copyright © 2014 Arthur Walton (arthur.walton2@gmail.com)
  * All Rights Reserved.
  *
  * Derived from: ROMFS file system
