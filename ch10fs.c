@@ -622,7 +622,7 @@ static struct inode *ch10fs_file_iget(struct super_block *sb,
 
 	/* walk the directory block linked list */
 	for (cblock = 0, db.next = cpu_to_be64(1), ino = 1;
-	    be64_to_cpu(db.next) != cblock;
+	     be64_to_cpu(db.next) != cblock;
 	     ino += (CH10_FILES_PER_DIR_ENTRY + 1)) {
 		cblock = be64_to_cpu(db.next);
 		ret = ch10fs_dev_read(sb, cblock * 512, &db, sizeof(db));
@@ -681,6 +681,49 @@ static struct inode *ch10fs_alloc_inode(struct super_block *sb)
 }
 
 /*
+ * reads the number of blocks used
+ */
+static u64 ch10fs_read_blk_cnt(struct super_block *sb)
+{
+	int ret, ino, f;
+	struct ch10fs_dir_block db;
+	struct ch10fs_file_entry fe;
+	u64 cblock;
+	u64 offset;
+	u64 blk_cnt = 0;
+
+	/* walk the directory block linked list */
+	for (cblock = 0, db.next = cpu_to_be64(1), ino = 1;
+	     be64_to_cpu(db.next) != cblock;
+	     ino += (CH10_FILES_PER_DIR_ENTRY + 1)) {
+		cblock = be64_to_cpu(db.next);
+		ret = ch10fs_dev_read(sb, cblock * 512, &db, sizeof(db));
+		if (ret < 0)
+			goto error;
+
+		if (db.mag0 != CH10FS_MAGIC_W0 || db.mag1 != CH10FS_MAGIC_W1) {
+			pr_warn("tried to read block %llu with invalid magic.\n",
+			       cblock);
+			goto error;
+		}
+
+		/* scan through files on this block */
+		offset = (cblock * 512) + sizeof(db);
+		for (f = 0; f < be16_to_cpu(db.file_cnt);
+		     f++, offset += sizeof(fe)) {
+			ret = ch10fs_dev_read(sb, offset, &fe, sizeof(fe));
+			if (ret < 0)
+				goto error;
+
+			blk_cnt += be64_to_cpu(fe.block_cnt);
+		}
+	}
+
+error:
+	return blk_cnt;
+}
+
+/*
  * return a spent inode to the slab cache
  */
 static void ch10fs_i_callback(struct rcu_head *head)
@@ -706,7 +749,7 @@ static int ch10fs_statfs(struct dentry *dentry, struct kstatfs *buf)
 	buf->f_namelen = CH10FS_MAXFN;
 	buf->f_bsize = CH10BSIZE;
 	buf->f_bfree = buf->f_bavail = buf->f_ffree;
-	buf->f_blocks = 1000;
+	buf->f_blocks = ch10fs_read_blk_cnt(sb) >> 1;
 	buf->f_fsid.val[0] = (u32)id;
 	buf->f_fsid.val[1] = (u32)(id >> 32);
 	return 0;
@@ -759,7 +802,7 @@ static int ch10fs_fill_super(struct super_block *sb, void *data, int silent)
 
 	if (csb->mag0 != CH10FS_MAGIC_W0 || csb->mag1 != CH10FS_MAGIC_W1) {
 		if (!silent)
-			pr_warn(" Can't find a ch10fs filesystem on dev %s.\n",
+			pr_warn("Can't find a ch10fs filesystem on dev %s.\n",
 				sb->s_id);
 		goto error_csb_inval;
 	}
